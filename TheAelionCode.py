@@ -7,31 +7,37 @@ from discord import app_commands
 
 load_dotenv()
 
+# ENV VARIABLES
 TOKEN = os.getenv("DISCORD_TOKEN")
-WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID"))
-ANNOUNCE_CHANNEL_ID = int(os.getenv("ANNOUNCE_CHANNEL_ID"))
-GUILD_ID = int(os.getenv("GUILD_ID"))
+
+WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID", 0))
+ANNOUNCE_CHANNEL_ID = int(os.getenv("ANNOUNCE_CHANNEL_ID", 0))
+GUILD_ID = int(os.getenv("GUILD_ID", 0))
 
 ROLE_DEFAULT = os.getenv("ROLE_DEFAULT", "Member")
 ROLE_CLIENT = os.getenv("ROLE_CLIENT", "Client")
 ROLE_DEVELOPER = os.getenv("ROLE_DEVELOPER", "Developer")
 ROLE_CORE = os.getenv("ROLE_CORE", "Core Team")
 
-intents = discord.Intents.all()
+# INTENTS
+intents = discord.Intents.default()
+intents.members = True
+intents.message_content = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("AelionBot")
 
-# -------------------------------
-# BUILD WELCOME EMBED
-# -------------------------------
-def build_welcome_embed(member):
+# ------------------------------------
+# WELCOME EMBED
+# ------------------------------------
+def build_welcome_embed(member: discord.Member):
     embed = discord.Embed(
         title=f"Welcome to TheAelionCode, {member.name}! 👋",
         description="We're excited to have you here!",
-        color=0xC5A46D,
+        color=0xC5A46D
     )
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.add_field(
@@ -43,73 +49,93 @@ def build_welcome_embed(member):
     return embed
 
 
-# -------------------------------
-# ASSIGN DEFAULT ROLES & CLIENT ROLES
-# -------------------------------
-async def assign_role(member, role_name):
+# ------------------------------------
+# SAFE ROLE ASSIGNMENT
+# ------------------------------------
+async def assign_role(member: discord.Member, role_name: str):
     role = discord.utils.get(member.guild.roles, name=role_name)
-    if role:
+    if role is None:
+        logger.warning(f"Role '{role_name}' not found in guild.")
+        return
+
+    try:
         await member.add_roles(role)
-        logger.info(f"Assigned {role_name} to {member.name}")
-    else:
-        logger.warning(f"Role '{role_name}' not found.")
+        logger.info(f"Assigned role '{role_name}' to {member}.")
+    except discord.Forbidden:
+        logger.error(f"Bot missing permissions to assign role: {role_name}")
+    except Exception as e:
+        logger.error(f"Error assigning role {role_name}: {e}")
 
 
-# -------------------------------
-# ON MEMBER JOIN
-# -------------------------------
+# ------------------------------------
+# MEMBER JOIN EVENT
+# ------------------------------------
 @bot.event
-async def on_member_join(member):
-    guild = member.guild
-    channel = guild.get_channel(WELCOME_CHANNEL_ID)
+async def on_member_join(member: discord.Member):
+    if member.guild is None:
+        return  # Safety check
 
-    # PUBLIC WELCOME
-    embed = build_welcome_embed(member)
-    await channel.send(embed=embed)
+    channel = member.guild.get_channel(WELCOME_CHANNEL_ID)
 
-    # DEFAULT ROLE
+    if channel:
+        embed = build_welcome_embed(member)
+        await channel.send(embed=embed)
+    else:
+        logger.warning("WELCOME_CHANNEL_ID is invalid.")
+
+    # Assign default role
     await assign_role(member, ROLE_DEFAULT)
 
-    # SPECIAL DM FOR CLIENTS
-    if "client" in member.name.lower():
-        await assign_role(member, ROLE_CLIENT)
-        await member.send(
-            "Hello Client! 👋\n\nWelcome to TheAelionCode.\nOur team will contact you shortly for onboarding."
-        )
+    # DM messages
+    try:
+        if "client" in member.name.lower():
+            await assign_role(member, ROLE_CLIENT)
+            await member.send(
+                "Hello Client! 👋\n\nWelcome to TheAelionCode.\nOur team will contact you shortly."
+            )
+        else:
+            await member.send(
+                f"Welcome to TheAelionCode, {member.name}! 😊\n"
+                "If you have questions, feel free to ask anytime."
+            )
+    except discord.Forbidden:
+        logger.warning("Could not DM new member (DMs blocked).")
 
-    else:
-        # REGULAR MEMBER DM
-        await member.send(
-            f"Welcome to TheAelionCode, {member.name}! 😊\n\nIf you have questions, feel free to message us anytime."
-        )
 
-
-# -------------------------------
+# ------------------------------------
 # SPAM PROTECTION
-# -------------------------------
-BLACKLIST = ["scam", "hack", "free nitro", "http://", "https://"]
+# ------------------------------------
+BLACKLIST = ["scam", "hack", "free nitro"]
 MAX_EMOJIS = 10
 MAX_MENTIONS = 5
 
+import emoji
+
+def count_emojis(text: str):
+    return sum(1 for char in text if emoji.is_emoji(char))
+
 
 @bot.event
-async def on_message(message):
+async def on_message(message: discord.Message):
+
     if message.author.bot:
         return
 
-    # BLOCK BLACKLISTED WORDS
-    if any(word in message.content.lower() for word in BLACKLIST):
+    content = message.content.lower()
+
+    # BLACKLIST FILTER
+    if any(word in content for word in BLACKLIST):
         await message.delete()
         await message.channel.send(f"{message.author.mention} ⚠ Spam detected and removed.")
         return
 
-    # TOO MANY EMOJIS
-    if sum(char in discord.emoji.EMOJI_DATA for char in message.content) > MAX_EMOJIS:
+    # EMOJI LIMIT
+    if count_emojis(message.content) > MAX_EMOJIS:
         await message.delete()
         await message.channel.send("⚠ Too many emojis! Message removed.")
         return
 
-    # TOO MANY MENTIONS
+    # MENTION LIMIT
     if len(message.mentions) > MAX_MENTIONS:
         await message.delete()
         await message.channel.send("⚠ Too many mentions! Please avoid tagging everyone.")
@@ -118,18 +144,22 @@ async def on_message(message):
     await bot.process_commands(message)
 
 
-# -------------------------------
+# ------------------------------------
 # SLASH COMMAND: ANNOUNCE
-# -------------------------------
+# ------------------------------------
 @tree.command(name="announce", description="Send an announcement")
 @app_commands.default_permissions(administrator=True)
 async def announce(interaction: discord.Interaction, message: str):
+
     channel = interaction.guild.get_channel(ANNOUNCE_CHANNEL_ID)
+    if channel is None:
+        await interaction.response.send_message("Announcement channel not found.", ephemeral=True)
+        return
 
     embed = discord.Embed(
         title="📢 Announcement",
         description=message,
-        color=0xE8C07D,
+        color=0xE8C07D
     )
     embed.set_footer(text=f"Announced by {interaction.user}")
 
@@ -137,42 +167,52 @@ async def announce(interaction: discord.Interaction, message: str):
     await interaction.response.send_message("Announcement sent!", ephemeral=True)
 
 
-# -------------------------------
+# ------------------------------------
 # SLASH COMMAND: PROJECT STATUS
-# -------------------------------
+# ------------------------------------
 PROJECT_STATUS = "No updates yet."
 
-
-@tree.command(name="project-status", description="View or update project status")
+@tree.command(name="project-status", description="View or update the project status")
 async def project_status(interaction: discord.Interaction, update: str = None):
     global PROJECT_STATUS
 
-    # Developer / Core Team can update
-    allowed_roles = ["Developer", "Core Team"]
+    roles_required = {ROLE_DEVELOPER, ROLE_CORE}
+    user_roles = {r.name for r in interaction.user.roles}
 
     if update:
-        if any(role.name in allowed_roles for role in interaction.user.roles):
+        # Updating requires privilege
+        if user_roles & roles_required:
             PROJECT_STATUS = update
             await interaction.response.send_message("Project status updated ✔")
         else:
             await interaction.response.send_message("Permission denied ❌", ephemeral=True)
-    else:
-        # Clients can only view
-        embed = discord.Embed(
-            title="📌 Project Status",
-            description=PROJECT_STATUS,
-            color=0xA68B5B
-        )
-        await interaction.response.send_message(embed=embed)
+        return
+
+    # Viewing
+    embed = discord.Embed(
+        title="📌 Project Status",
+        description=PROJECT_STATUS,
+        color=0xA68B5B
+    )
+    await interaction.response.send_message(embed=embed)
 
 
-# -------------------------------
+# ------------------------------------
 # BOT READY
-# -------------------------------
+# ------------------------------------
 @bot.event
 async def on_ready():
-    await tree.sync(guild=discord.Object(id=GUILD_ID))
-    logger.info("AelionCode Bot is online!")
+    try:
+        guild = discord.Object(id=GUILD_ID)
+        await tree.sync(guild=guild)
+        logger.info("Slash commands synced successfully.")
+    except Exception as e:
+        logger.error(f"Command sync failed: {e}")
+
+    logger.info(f"{bot.user} is now online!")
 
 
+# ------------------------------------
+# RUN BOT
+# ------------------------------------
 bot.run(TOKEN)
